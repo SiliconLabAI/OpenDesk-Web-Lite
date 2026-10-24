@@ -1,0 +1,12 @@
+node_modules
+.output
+dist
+.vinxi
+.data
+data/*.sqlite
+data/*.sqlite-*
+data/storage/**
+.env
+.env.local
+*.log
+data/*
