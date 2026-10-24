@@ -5,7 +5,7 @@ import {
   loadProfile,
   profileToPromptBlock,
 } from '~/lib/profile'
-import { loadSettings } from '~/lib/settings/client'
+import { loadSettings, loadSettingsAsync } from '~/lib/settings/client'
 import { runChat } from '~/lib/chat/run'
 import { pollChatResearch } from '~/lib/chat/researchJob'
 import {
@@ -252,7 +252,7 @@ function ChatPage() {
     setBusy(true)
 
     const profile = profileToPromptBlock(loadProfile())
-    const settings = loadSettings()
+    const settings = await loadSettingsAsync()
     const priorOutputs: Array<{ skillSlug: string; content: string }> = []
 
     try {
@@ -280,25 +280,43 @@ function ChatPage() {
         }
 
         // Messages for this step: full thread so far + prior skill outputs as system context via priorOutputs
-        const res = await runChat({
-          data: {
-            messages: withUser.messages.map((m) => ({
-              role: m.role,
-              content: m.content,
-            })),
-            skillSlug: slug,
-            skillValues,
-            priorOutputs: priorOutputs.length ? priorOutputs : undefined,
-            profile,
-            settings,
-          },
-        })
+        let res: Awaited<ReturnType<typeof runChat>> | null = null
+        try {
+          res = await runChat({
+            data: {
+              messages: withUser.messages.map((m) => ({
+                role: m.role,
+                content: m.content,
+              })),
+              skillSlug: slug,
+              skillValues,
+              priorOutputs: priorOutputs.length ? priorOutputs : undefined,
+              profile,
+              settings,
+            },
+          })
+        } catch (callErr) {
+          const msg =
+            callErr instanceof Error ? callErr.message : String(callErr)
+          res = {
+            ok: false as const,
+            error: msg,
+            content: `**Error:** ${msg}`,
+            pending: false as const,
+          } as Awaited<ReturnType<typeof runChat>>
+        }
 
-        if (!res) {
+        // TanStack may wrap or return undefined on transport failure
+        if (res && typeof res === 'object' && 'result' in (res as object)) {
+          res = (res as { result: typeof res }).result
+        }
+
+        if (!res || typeof res !== 'object') {
           const errMsg: ChatMessage = {
             id: newUuid(),
             role: 'assistant',
-            content: '**Error:** empty server response',
+            content:
+              '**Error:** empty server response — the chat server function did not return data. Check Logs and that SQLite/LLM keys are configured.',
             skillSlug: slug,
             sequenceStep:
               pipeline.length > 1

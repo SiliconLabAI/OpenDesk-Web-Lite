@@ -31,10 +31,23 @@ export const registerManusWebhook = createServerFn({ method: 'POST' })
     }),
   )
   .handler(async ({ data }) => {
+    const resolved = resolveSettings({
+      manusApiKey: data.manusApiKey,
+      appUrl: data.appUrl,
+    })
+    const apiKey = resolved.manusApiKey?.trim()
+    if (!apiKey) {
+      return {
+        ok: false as const,
+        error:
+          'MANUS_API_KEY is not set (add it in Settings or env)',
+        callback: '',
+      }
+    }
     const callback = `${data.appUrl.replace(/\/$/, '')}/api/webhooks/manus`
     try {
       const result = await manusRegisterWebhook(callback, {
-        apiKey: data.manusApiKey,
+        apiKey,
       })
       return {
         ok: true as const,

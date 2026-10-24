@@ -79,12 +79,21 @@ export const runChat = createServerFn({ method: 'POST' })
           }),
         )
         .optional(),
-      profile: z.string().min(1),
+      profile: z.string().default(''),
       settings: SettingsPartial,
     }),
   )
   .handler(async ({ data }) => {
     try {
+      if (!data.profile?.trim()) {
+        return {
+          ok: false as const,
+          error: 'Profile is empty — fill /profile first',
+          content:
+            '**Error:** Client profile is empty. Open **Profile** and save company context before chatting.',
+          pending: false as const,
+        }
+      }
       const settings = resolveSettings(data.settings)
       const skill = data.skillSlug ? getSkill(data.skillSlug) : undefined
       const lastUser =

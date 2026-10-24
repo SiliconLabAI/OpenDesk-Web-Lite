@@ -38,13 +38,15 @@ export type ManusWebhookEnvelope = {
 }
 
 function resolveKey(ctx?: ManusCtx): string {
-  const k = ctx?.apiKey || process.env.MANUS_API_KEY
-  if (!k) throw new Error('MANUS_API_KEY is not set (add it in Settings or env)')
+  const k = (ctx?.apiKey || process.env.MANUS_API_KEY || '').trim()
+  if (!k) {
+    throw new Error('MANUS_API_KEY is not set (add it in Settings or env)')
+  }
   return k
 }
 
 export function hasManusConfig(ctx?: ManusCtx): boolean {
-  return Boolean(ctx?.apiKey || process.env.MANUS_API_KEY)
+  return Boolean((ctx?.apiKey || process.env.MANUS_API_KEY || '').trim())
 }
 
 /**
@@ -697,14 +699,30 @@ export async function manusRunAndWait(
 
 export async function manusRegisterWebhook(
   url: string,
-  events: string[],
+  eventsOrCtx: string[] | ManusCtx = [
+    'task_stopped',
+    'task_failed',
+    'task_completed',
+  ],
   ctx?: ManusCtx,
 ) {
+  // Support call shapes:
+  //   manusRegisterWebhook(url, { apiKey })
+  //   manusRegisterWebhook(url, events, { apiKey })
+  let events: string[]
+  let keyCtx: ManusCtx | undefined
+  if (Array.isArray(eventsOrCtx)) {
+    events = eventsOrCtx
+    keyCtx = ctx
+  } else {
+    events = ['task_stopped', 'task_failed', 'task_completed']
+    keyCtx = eventsOrCtx
+  }
   const res = await fetch(`${BASE}/v2/webhook.create`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-manus-api-key': resolveKey(ctx),
+      'x-manus-api-key': resolveKey(keyCtx),
     },
     body: JSON.stringify({ url, events }),
   })
