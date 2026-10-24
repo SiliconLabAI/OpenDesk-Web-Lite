@@ -2,12 +2,15 @@
  * SQLite database client for opendesk-web.
  * Exports: getDb(), hasDb()
  * Uses Node.js built-in node:sqlite (DatabaseSync).
+ * Node builtins are loaded lazily so this module can be imported from
+ * createServerFn modules without breaking the browser bundle.
  */
-import fs from 'node:fs'
-import path from 'node:path'
-import { randomUUID } from 'node:crypto'
-import { fileURLToPath } from 'node:url'
-import { DatabaseSync } from 'node:sqlite'
+import { newUuid } from '~/lib/id'
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+declare const require: (id: string) => any
+
+type DatabaseSync = import('node:sqlite').DatabaseSync
 
 type Json = Record<string, unknown> | unknown[] | string | number | boolean | null
 
@@ -26,44 +29,63 @@ const JSON_COLUMNS = new Set([
 ])
 
 function dbPath(): string {
-  return (
-    process.env.SQLITE_PATH ||
-    process.env.DATABASE_PATH ||
-    path.join(process.cwd(), 'data', 'opendesk.sqlite')
-  )
+  if (process.env.SQLITE_PATH) return process.env.SQLITE_PATH
+  if (process.env.DATABASE_PATH) return process.env.DATABASE_PATH
+  const sep = process.cwd().includes('\\') ? '\\' : '/'
+  return process.cwd() + sep + 'data' + sep + 'opendesk.sqlite'
 }
 
 function storageRoot(): string {
-  return (
-    process.env.STORAGE_PATH ||
-    path.join(process.cwd(), 'data', 'storage')
-  )
+  if (process.env.STORAGE_PATH) return process.env.STORAGE_PATH
+  const sep = process.cwd().includes('\\') ? '\\' : '/'
+  return process.cwd() + sep + 'data' + sep + 'storage'
 }
 
 let _db: DatabaseSync | null = null
 let _client: SqliteClient | null = null
 
+function assertServer() {
+  if (typeof window !== 'undefined') {
+    throw new Error('SQLite getDb() is server-only')
+  }
+}
+
 function getRawDb(): DatabaseSync {
   if (_db) return _db
+  assertServer()
+  // Lazy require so Vite does not pull node builtins into the client graph
+  const fs = require('node:fs') as typeof import('node:fs')
+  const path = require('node:path') as typeof import('node:path')
+  const { DatabaseSync: DB } = require('node:sqlite') as typeof import('node:sqlite')
   const file = dbPath()
   fs.mkdirSync(path.dirname(file), { recursive: true })
   fs.mkdirSync(storageRoot(), { recursive: true })
-  _db = new DatabaseSync(file)
+  _db = new DB(file)
   _db.exec('PRAGMA journal_mode = WAL')
   _db.exec('PRAGMA foreign_keys = ON')
-  initSchema(_db)
+  initSchema(_db, fs, path)
   return _db
 }
 
-function initSchema(db: DatabaseSync) {
-  const schemaPath = path.join(
-    path.dirname(fileURLToPath(import.meta.url)),
-    'schema.sql',
-  )
+function initSchema(
+  db: DatabaseSync,
+  fs: typeof import('node:fs'),
+  path: typeof import('node:path'),
+) {
+  const { fileURLToPath } = require('node:url') as typeof import('node:url')
   let sql = ''
-  if (fs.existsSync(schemaPath)) {
-    sql = fs.readFileSync(schemaPath, 'utf8')
-  } else {
+  try {
+    const schemaPath = path.join(
+      path.dirname(fileURLToPath(import.meta.url)),
+      'schema.sql',
+    )
+    if (fs.existsSync(schemaPath)) {
+      sql = fs.readFileSync(schemaPath, 'utf8')
+    }
+  } catch {
+    /* import.meta.url may differ under bundlers */
+  }
+  if (!sql) {
     const alt = path.join(process.cwd(), 'src/lib/db/schema.sql')
     if (fs.existsSync(alt)) sql = fs.readFileSync(alt, 'utf8')
   }
@@ -186,7 +208,7 @@ class QueryBuilder {
   }
 
   private ensureId(row: Record<string, unknown>) {
-    if (!row.id) row.id = randomUUID()
+    if (!row.id) row.id = newUuid()
     return row
   }
 
@@ -329,6 +351,9 @@ class StorageBucket {
     _opts?: { contentType?: string; upsert?: boolean },
   ) {
     try {
+      assertServer()
+      const fs = require('node:fs') as typeof import('node:fs')
+      const path = require('node:path') as typeof import('node:path')
       const root = path.join(storageRoot(), this.bucket)
       const full = path.join(root, objectPath)
       fs.mkdirSync(path.dirname(full), { recursive: true })
@@ -344,6 +369,9 @@ class StorageBucket {
 
   async download(objectPath: string) {
     try {
+      assertServer()
+      const fs = require('node:fs') as typeof import('node:fs')
+      const path = require('node:path') as typeof import('node:path')
       const full = path.join(storageRoot(), this.bucket, objectPath)
       const buf = fs.readFileSync(full)
       return { data: buf, error: null }
