@@ -9,18 +9,24 @@ export type ChatMessage = {
   role: 'user' | 'assistant' | 'system'
   content: string
   skillSlug?: string
+  /** Ordered skills when a step is part of a multi-skill sequence */
+  skillSlugs?: string[]
   createdAt: string
   /** Manus research job — resume poll after refresh */
   jobId?: string
   pending?: boolean
   manusTaskId?: string
   manusTaskUrl?: string
+  /** e.g. "2/3" when running a skill sequence */
+  sequenceStep?: string
 }
 
 export type ChatThread = {
   id: string
   title: string
   skillSlug?: string
+  /** Ordered skill pipeline for this thread / next send */
+  skillSlugs?: string[]
   messages: ChatMessage[]
   updatedAt: string
 }
@@ -70,6 +76,7 @@ export async function upsertThread(thread: ChatThread): Promise<void> {
         id: thread.id,
         title: thread.title,
         skillSlug: thread.skillSlug,
+        skillSlugs: thread.skillSlugs,
         messages: thread.messages,
       },
     })

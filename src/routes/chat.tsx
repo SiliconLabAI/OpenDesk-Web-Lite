@@ -66,9 +66,10 @@ function ChatPage() {
   const [ready, setReady] = useState(true)
   const [threads, setThreads] = useState<ChatThread[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
-  const [skillSlug, setSkillSlug] = useState<string | undefined>()
+  const [skillSlugs, setSkillSlugs] = useState<string[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [busyLabel, setBusyLabel] = useState('')
   const [skillPickerOpen, setSkillPickerOpen] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
 
@@ -173,11 +174,33 @@ function ChatPage() {
     const t: ChatThread = {
       id: newUuid(),
       title: 'New chat',
-      skillSlug,
+      skillSlug: skillSlugs[0],
+      skillSlugs: skillSlugs.length ? [...skillSlugs] : undefined,
       messages: [],
       updatedAt: new Date().toISOString(),
     }
     void persist(t)
+  }
+
+  function addSkill(slug: string) {
+    setSkillSlugs((prev) => (prev.includes(slug) ? prev : [...prev, slug]))
+    setSkillPickerOpen(false)
+  }
+
+  function removeSkill(slug: string) {
+    setSkillSlugs((prev) => prev.filter((s) => s !== slug))
+  }
+
+  function moveSkill(slug: string, dir: -1 | 1) {
+    setSkillSlugs((prev) => {
+      const i = prev.indexOf(slug)
+      if (i < 0) return prev
+      const j = i + dir
+      if (j < 0 || j >= prev.length) return prev
+      const next = [...prev]
+      ;[next[i], next[j]] = [next[j], next[i]]
+      return next
+    })
   }
 
   async function onSend(e?: React.FormEvent) {
@@ -189,12 +212,19 @@ function ChatPage() {
     const text = input.trim()
     if (!text || busy) return
 
+    const pipeline = skillSlugs.length
+      ? [...skillSlugs]
+      : active?.skillSlugs?.length
+        ? [...active.skillSlugs]
+        : []
+
     let thread = active
     if (!thread) {
       thread = {
         id: newUuid(),
         title: text.slice(0, 48),
-        skillSlug,
+        skillSlug: pipeline[0],
+        skillSlugs: pipeline.length ? pipeline : undefined,
         messages: [],
         updatedAt: new Date().toISOString(),
       }
@@ -204,173 +234,248 @@ function ChatPage() {
       id: newUuid(),
       role: 'user',
       content: text,
-      skillSlug,
+      skillSlug: pipeline[0],
+      skillSlugs: pipeline.length ? pipeline : undefined,
       createdAt: new Date().toISOString(),
     }
 
-    const withUser: ChatThread = {
+    let withUser: ChatThread = {
       ...thread,
-      title:
-        thread.messages.length === 0 ? text.slice(0, 48) : thread.title,
-      skillSlug: skillSlug || thread.skillSlug,
+      title: thread.messages.length === 0 ? text.slice(0, 48) : thread.title,
+      skillSlug: pipeline[0] || thread.skillSlug,
+      skillSlugs: pipeline.length ? pipeline : thread.skillSlugs,
       messages: [...thread.messages, userMsg],
       updatedAt: new Date().toISOString(),
     }
-    await persist(withUser)
     setInput('')
+    await persist(withUser)
     setBusy(true)
 
+    const profile = profileToPromptBlock(loadProfile())
+    const settings = loadSettings()
+    const priorOutputs: Array<{ skillSlug: string; content: string }> = []
+
     try {
-      let skillValues: Record<string, string> | undefined
-      const slug = skillSlug || withUser.skillSlug
-      if (slug) {
-        try {
-          const draft = await loadSkillDraft({ data: { skillSlug: slug } })
-          if (draft.ok && draft.values) skillValues = draft.values
-        } catch {
-          /* no draft */
-        }
-      }
+      // No skills → single plain chat turn
+      const steps = pipeline.length ? pipeline : [undefined]
 
-      const res = await runChat({
-        data: {
-          messages: withUser.messages.map((m) => ({
-            role: m.role,
-            content: m.content,
-          })),
-          skillSlug: slug,
-          skillValues,
-          profile: profileToPromptBlock(loadProfile()),
-          settings: loadSettings(),
-        },
-      })
+      for (let step = 0; step < steps.length; step++) {
+        const slug = steps[step]
+        const stepLabel =
+          pipeline.length > 1
+            ? `Running /${slug} (${step + 1}/${pipeline.length})…`
+            : slug
+              ? `Running /${slug}…`
+              : 'Thinking…'
+        setBusyLabel(stepLabel)
 
-      if (!res) {
-        throw new Error('Chat failed (empty server response)')
-      }
-
-      // Manus async research: show pending, then poll until callback/poll completes
-      if (res.ok && res.pending && res.jobId) {
-        const pendingMsg: ChatMessage = {
-          id: newUuid(),
-          role: 'assistant',
-          content: res.content || '## Researching with Manus…',
-          skillSlug: skillSlug || withUser.skillSlug,
-          createdAt: new Date().toISOString(),
-          jobId: res.jobId,
-          pending: true,
-          manusTaskId: res.manusTaskId,
-          manusTaskUrl: res.manusTaskUrl,
-        }
-        let thread = {
-          ...withUser,
-          messages: [...withUser.messages, pendingMsg],
-          updatedAt: new Date().toISOString(),
-        }
-        await persist(thread)
-
-        const result = await waitForResearchJob(res.jobId)
-        if (result.status === 'completed') {
-          const finalMsg: ChatMessage = {
-            id: newUuid(),
-            role: 'assistant',
-            content: result.content || 'Research completed (empty output).',
-            skillSlug: skillSlug || withUser.skillSlug,
-            createdAt: new Date().toISOString(),
-            pending: false,
-            jobId: res.jobId,
-            manusTaskUrl: result.manusTaskUrl || res.manusTaskUrl,
+        let skillValues: Record<string, string> | undefined
+        if (slug) {
+          try {
+            const draft = await loadSkillDraft({ data: { skillSlug: slug } })
+            if (draft.ok && draft.values) skillValues = draft.values
+          } catch {
+            /* no draft */
           }
-          thread = {
-            ...thread,
-            messages: [
-              ...thread.messages.filter((m) => m.id !== pendingMsg.id),
-              finalMsg,
-            ],
-            updatedAt: new Date().toISOString(),
-          }
-          await persist(thread)
-        } else if (result.status === 'failed') {
+        }
+
+        // Messages for this step: full thread so far + prior skill outputs as system context via priorOutputs
+        const res = await runChat({
+          data: {
+            messages: withUser.messages.map((m) => ({
+              role: m.role,
+              content: m.content,
+            })),
+            skillSlug: slug,
+            skillValues,
+            priorOutputs: priorOutputs.length ? priorOutputs : undefined,
+            profile,
+            settings,
+          },
+        })
+
+        if (!res) {
           const errMsg: ChatMessage = {
             id: newUuid(),
             role: 'assistant',
-            content: `**Research failed:** ${result.error || 'unknown'}`,
+            content: '**Error:** empty server response',
+            skillSlug: slug,
+            sequenceStep:
+              pipeline.length > 1
+                ? `${step + 1}/${pipeline.length}`
+                : undefined,
             createdAt: new Date().toISOString(),
-            pending: false,
-            jobId: res.jobId,
           }
-          thread = {
-            ...thread,
-            messages: [
-              ...thread.messages.filter((m) => m.id !== pendingMsg.id),
-              errMsg,
-            ],
+          withUser = {
+            ...withUser,
+            messages: [...withUser.messages, errMsg],
             updatedAt: new Date().toISOString(),
           }
-          await persist(thread)
-        } else {
-          // Keep pending message with jobId so refresh can resume
-          const stillMsg: ChatMessage = {
-            ...pendingMsg,
-            content: [
-              '## Researching with Manus…',
-              '',
-              'Task: `' +
-                (res.manusTaskId || '') +
-                '`' +
-                (res.manusTaskUrl
-                  ? ' — [open in Manus](' + res.manusTaskUrl + ')'
-                  : ''),
-              '',
-              'Still waiting. Keep this tab open, or refresh later — the job will resume automatically.',
-            ].join('\n'),
-            pending: true,
-            jobId: res.jobId,
-          }
-          thread = {
-            ...thread,
-            messages: [
-              ...thread.messages.filter((m) => m.id !== pendingMsg.id),
-              stillMsg,
-            ],
-            updatedAt: new Date().toISOString(),
-          }
-          await persist(thread)
+          await persist(withUser)
+          break
         }
-      } else {
 
+        // Manus pending for this skill step
+        if (res.ok && res.pending && res.jobId) {
+          const pendingMsg: ChatMessage = {
+            id: newUuid(),
+            role: 'assistant',
+            content: res.content || `## Researching with Manus… (/${slug})`,
+            skillSlug: slug,
+            skillSlugs: pipeline.length ? pipeline : undefined,
+            sequenceStep:
+              pipeline.length > 1
+                ? `${step + 1}/${pipeline.length}`
+                : undefined,
+            createdAt: new Date().toISOString(),
+            jobId: res.jobId,
+            pending: true,
+            manusTaskId: res.manusTaskId,
+            manusTaskUrl: res.manusTaskUrl,
+          }
+          withUser = {
+            ...withUser,
+            messages: [...withUser.messages, pendingMsg],
+            updatedAt: new Date().toISOString(),
+          }
+          await persist(withUser)
+
+          setBusyLabel(
+            pipeline.length > 1
+              ? `Waiting on Manus for /${slug} (${step + 1}/${pipeline.length})…`
+              : `Waiting on Manus for /${slug}…`,
+          )
+          const result = await waitForResearchJob(res.jobId)
+          if (result.status === 'completed') {
+            const finalMsg: ChatMessage = {
+              id: newUuid(),
+              role: 'assistant',
+              content: result.content || 'Research completed (empty output).',
+              skillSlug: slug,
+              skillSlugs: pipeline.length ? pipeline : undefined,
+              sequenceStep:
+                pipeline.length > 1
+                  ? `${step + 1}/${pipeline.length}`
+                  : undefined,
+              createdAt: new Date().toISOString(),
+              pending: false,
+              jobId: res.jobId,
+              manusTaskUrl: result.manusTaskUrl || res.manusTaskUrl,
+            }
+            withUser = {
+              ...withUser,
+              messages: [
+                ...withUser.messages.filter((m) => m.id !== pendingMsg.id),
+                finalMsg,
+              ],
+              updatedAt: new Date().toISOString(),
+            }
+            await persist(withUser)
+            if (slug && finalMsg.content) {
+              priorOutputs.push({ skillSlug: slug, content: finalMsg.content })
+            }
+          } else if (result.status === 'failed') {
+            const errMsg: ChatMessage = {
+              id: newUuid(),
+              role: 'assistant',
+              content: `**Research failed** (/${slug}): ${result.error || 'unknown'}`,
+              skillSlug: slug,
+              sequenceStep:
+                pipeline.length > 1
+                  ? `${step + 1}/${pipeline.length}`
+                  : undefined,
+              createdAt: new Date().toISOString(),
+              pending: false,
+              jobId: res.jobId,
+            }
+            withUser = {
+              ...withUser,
+              messages: [
+                ...withUser.messages.filter((m) => m.id !== pendingMsg.id),
+                errMsg,
+              ],
+              updatedAt: new Date().toISOString(),
+            }
+            await persist(withUser)
+            break
+          } else {
+            const stillMsg: ChatMessage = {
+              ...pendingMsg,
+              content: [
+                `## Researching with Manus… (/${slug})`,
+                '',
+                'Task: `' +
+                  (res.manusTaskId || '') +
+                  '`' +
+                  (res.manusTaskUrl
+                    ? ' — [open in Manus](' + res.manusTaskUrl + ')'
+                    : ''),
+                '',
+                'Still waiting. Refresh later to resume; remaining skills in the sequence will not run until this completes.',
+              ].join('\n'),
+              pending: true,
+              jobId: res.jobId,
+            }
+            withUser = {
+              ...withUser,
+              messages: [
+                ...withUser.messages.filter((m) => m.id !== pendingMsg.id),
+                stillMsg,
+              ],
+              updatedAt: new Date().toISOString(),
+            }
+            await persist(withUser)
+            break
+          }
+          continue
+        }
+
+        // Sync reply
+        const content = res.ok
+          ? res.content || ''
+          : `**Error:** ${res.error || 'Chat failed'}`
         const assistant: ChatMessage = {
           id: newUuid(),
           role: 'assistant',
-          content:
-            res.ok
-              ? res.content || ''
-              : `**Error:** ${res.error || 'Chat failed'}`,
-          skillSlug: skillSlug || withUser.skillSlug,
+          content,
+          skillSlug: slug,
+          skillSlugs: pipeline.length ? pipeline : undefined,
+          sequenceStep:
+            pipeline.length > 1
+              ? `${step + 1}/${pipeline.length}`
+              : undefined,
           createdAt: new Date().toISOString(),
         }
-        await persist({
+        withUser = {
           ...withUser,
           messages: [...withUser.messages, assistant],
           updatedAt: new Date().toISOString(),
-        })
+        }
+        await persist(withUser)
+        if (slug && res.ok && content) {
+          priorOutputs.push({ skillSlug: slug, content })
+        }
+        if (!res.ok) break
       }
     } catch (err) {
-      const assistant: ChatMessage = {
+      const msg = err instanceof Error ? err.message : String(err)
+      const errMsg: ChatMessage = {
         id: newUuid(),
         role: 'assistant',
-        content: `**Error:** ${err instanceof Error ? err.message : String(err)}`,
+        content: `**Error:** ${msg}`,
         createdAt: new Date().toISOString(),
       }
       await persist({
         ...withUser,
-        messages: [...withUser.messages, assistant],
+        messages: [...withUser.messages, errMsg],
         updatedAt: new Date().toISOString(),
       })
     } finally {
       setBusy(false)
+      setBusyLabel('')
     }
   }
+
 
   if (!ready) {
     return (
@@ -390,7 +495,9 @@ function ChatPage() {
     )
   }
 
-  const attached = skillSlug ? getSkill(skillSlug) : null
+  const attachedSkills = skillSlugs
+    .map((s) => getSkill(s))
+    .filter(Boolean) as ReturnType<typeof getSkill>[]
 
   return (
     <div className="flex h-[calc(100vh-3.5rem-3rem)] max-w-6xl mx-auto gap-4 -mt-2">
@@ -417,7 +524,13 @@ function ChatPage() {
               }`}
               onClick={() => {
                 setActiveId(t.id)
-                setSkillSlug(t.skillSlug)
+                setSkillSlugs(
+                  t.skillSlugs?.length
+                    ? [...t.skillSlugs]
+                    : t.skillSlug
+                      ? [t.skillSlug]
+                      : [],
+                )
               }}
             >
               <span className="flex-1 truncate">{t.title || 'Untitled'}</span>
@@ -462,7 +575,7 @@ function ChatPage() {
         <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
           {(!active || active.messages.length === 0) && !busy && (
             <div className="text-center text-sm text-[var(--muted)] mt-16 space-y-2">
-              <p>Ask anything PR-related, or attach a skill below.</p>
+              <p>Ask anything PR-related, or attach one or more skills below (they run in order).</p>
               <p className="text-xs">
                 Profile and conversation history stay in context.
               </p>
@@ -481,9 +594,22 @@ function ChatPage() {
                     : 'bg-[var(--bg)] border border-[var(--border)] text-[var(--text)]'
                 }`}
               >
-                {m.skillSlug && m.role === 'user' && (
-                  <div className="text-[10px] text-[var(--muted)] mb-1 font-mono">
-                    /{m.skillSlug}
+                {(m.skillSlug || (m.skillSlugs && m.skillSlugs.length > 0)) && (
+                  <div className="text-[10px] text-[var(--muted)] mb-1 font-mono flex flex-wrap gap-1">
+                    {m.role === 'user' && m.skillSlugs && m.skillSlugs.length > 1 ? (
+                      m.skillSlugs.map((s, i) => (
+                        <span key={s}>
+                          {i > 0 ? '→ ' : ''}/{s}
+                        </span>
+                      ))
+                    ) : (
+                      <>
+                        {m.skillSlug ? `/${m.skillSlug}` : null}
+                        {m.sequenceStep ? (
+                          <span className="opacity-70"> · step {m.sequenceStep}</span>
+                        ) : null}
+                      </>
+                    )}
                   </div>
                 )}
                 <div>
@@ -497,7 +623,8 @@ function ChatPage() {
             <div className="flex justify-start">
               <div className="rounded-2xl px-4 py-3 bg-[var(--bg)] border border-[var(--border)] space-y-2">
                 <div className="text-xs text-[var(--muted)]">
-                  Waiting for Manus research (up to ~3 min) then writing the reply…
+                  {busyLabel ||
+                    'Working… (live research may take up to ~3 min)'}
                 </div>
                 <div className="shimmer-lines">
                   <div className="shimmer-line w-48" />
@@ -513,43 +640,81 @@ function ChatPage() {
         {/* Composer */}
         <div className="border-t border-[var(--border)] p-3 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
-            {attached ? (
-              <button
-                type="button"
-                onClick={() => setSkillSlug(undefined)}
-                className="inline-flex items-center gap-1.5 rounded-full border border-[var(--accent-dim)] bg-[var(--accent)]/10 px-3 py-1 text-xs"
+            {attachedSkills.map((s, idx) => (
+              <div
+                key={s!.slug}
+                className="inline-flex items-center gap-1 rounded-full border border-[var(--accent-dim)] bg-[var(--accent)]/10 px-2 py-1 text-xs"
               >
-                <span>{attached.icon}</span>
-                <span>/{attached.slug}</span>
-                <span className="opacity-60">×</span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setSkillPickerOpen((o) => !o)}
-                className="inline-flex items-center rounded-full border border-[var(--border)] px-3 py-1 text-xs text-[var(--muted)] hover:text-[var(--text)]"
-              >
-                + Attach skill
-              </button>
+                <span className="text-[10px] text-[var(--muted)] font-mono">
+                  {idx + 1}.
+                </span>
+                <span>{s!.icon}</span>
+                <span>/{s!.slug}</span>
+                {attachedSkills.length > 1 && (
+                  <>
+                    <button
+                      type="button"
+                      title="Move earlier"
+                      className="opacity-60 hover:opacity-100 px-0.5"
+                      onClick={() => moveSkill(s!.slug, -1)}
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      title="Move later"
+                      className="opacity-60 hover:opacity-100 px-0.5"
+                      onClick={() => moveSkill(s!.slug, 1)}
+                    >
+                      ↓
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  title="Remove"
+                  className="opacity-60 hover:opacity-100 ml-0.5"
+                  onClick={() => removeSkill(s!.slug)}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={() => setSkillPickerOpen((o) => !o)}
+              className="inline-flex items-center rounded-full border border-[var(--border)] px-3 py-1 text-xs text-[var(--muted)] hover:text-[var(--text)]"
+            >
+              + Add skill
+            </button>
+            {skillSlugs.length > 1 && (
+              <span className="text-[10px] text-[var(--muted)]">
+                Runs in order left → right
+              </span>
             )}
           </div>
 
-          {skillPickerOpen && !attached && (
-            <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
-              {SKILLS.map((s) => (
-                <button
-                  key={s.slug}
-                  type="button"
-                  onClick={() => {
-                    setSkillSlug(s.slug)
-                    setSkillPickerOpen(false)
-                  }}
-                  className="inline-flex items-center gap-1 rounded-full border border-[var(--border)] px-2.5 py-1 text-xs hover:bg-[var(--surface-2)]"
-                >
-                  <span>{s.icon}</span>
-                  {s.name}
-                </button>
-              ))}
+          {skillPickerOpen && (
+            <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
+              {SKILLS.map((s) => {
+                const on = skillSlugs.includes(s.slug)
+                return (
+                  <button
+                    key={s.slug}
+                    type="button"
+                    onClick={() => (on ? removeSkill(s.slug) : addSkill(s.slug))}
+                    className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs hover:bg-[var(--surface-2)] ${
+                      on
+                        ? 'border-[var(--accent-dim)] bg-[var(--accent)]/10'
+                        : 'border-[var(--border)]'
+                    }`}
+                  >
+                    <span>{s.icon}</span>
+                    {s.name}
+                    {on ? ' ✓' : ''}
+                  </button>
+                )
+              })}
             </div>
           )}
 
@@ -557,9 +722,11 @@ function ChatPage() {
             <textarea
               className="flex-1 rounded-xl border border-[var(--border)] bg-[var(--bg)] px-3 py-2.5 text-sm min-h-[2.75rem] max-h-32 resize-y"
               placeholder={
-                attached
-                  ? `Message with /${attached.slug}…`
-                  : 'Message Newsjack…'
+                skillSlugs.length > 1
+                  ? `Message with sequence: ${skillSlugs.map((s) => '/' + s).join(' → ')}…`
+                  : skillSlugs.length === 1
+                    ? `Message with /${skillSlugs[0]}…`
+                    : 'Message Newsjack…'
               }
               value={input}
               onChange={(e) => setInput(e.target.value)}

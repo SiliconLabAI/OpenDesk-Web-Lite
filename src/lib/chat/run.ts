@@ -68,7 +68,17 @@ export const runChat = createServerFn({ method: 'POST' })
     z.object({
       messages: z.array(MessageSchema).min(1),
       skillSlug: z.string().optional(),
+      /** When set, only this skill runs (client runs sequence by calling multiple times). */
       skillValues: z.record(z.string()).optional(),
+      /** Prior skill outputs in a sequence — injected as ground-truth context. */
+      priorOutputs: z
+        .array(
+          z.object({
+            skillSlug: z.string(),
+            content: z.string(),
+          }),
+        )
+        .optional(),
       profile: z.string().min(1),
       settings: SettingsPartial,
     }),
@@ -167,6 +177,16 @@ ${liveResearch}`
       }
 
       // --- Path B: normal chat / skill without live research ---
+      const priorBlock =
+        data.priorOutputs && data.priorOutputs.length
+          ? data.priorOutputs
+              .map(
+                (p, i) =>
+                  `### Prior skill ${i + 1}: /${p.skillSlug}\n${p.content}`,
+              )
+              .join('\n\n')
+          : ''
+
       let skillContext = ''
       if (skill) {
         let values = data.skillValues || {}
@@ -206,6 +226,7 @@ Ethics: no invented facts, journalists, or headlines.
 ## Client profile
 ${data.profile}
 ${skillContext}
+${priorBlock ? `## Prior skill results (sequence)\nUse these as ground truth for the current skill. Do not discard useful findings.\n${priorBlock}` : ''}
 Respond in clear markdown. If the user needs live news, ask them to attach a detect skill or configure Manus.`
 
       const history = data.messages
