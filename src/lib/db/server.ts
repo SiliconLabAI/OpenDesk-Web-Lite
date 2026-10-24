@@ -2,17 +2,28 @@
  * SQLite database client for opendesk-web.
  * Exports: getDb(), hasDb()
  * Uses Node.js built-in node:sqlite (DatabaseSync).
- * Node builtins are loaded lazily so this module can be imported from
- * createServerFn modules without breaking the browser bundle.
+ * Node builtins load via process.getBuiltinModule (no require, no static node: imports)
+ * so createServerFn modules can be referenced from the client without breaking the browser bundle.
  */
 import { newUuid } from '~/lib/id'
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-declare const require: (id: string) => any
-
 type DatabaseSync = import('node:sqlite').DatabaseSync
+type FsType = typeof import('node:fs')
+type PathType = typeof import('node:path')
+type UrlType = typeof import('node:url')
+type SqliteType = typeof import('node:sqlite')
 
-type Json = Record<string, unknown> | unknown[] | string | number | boolean | null
+function nodeBuiltin<T>(id: string): T {
+  const proc = globalThis.process as
+    | { getBuiltinModule?: (id: string) => unknown }
+    | undefined
+  if (!proc || typeof proc.getBuiltinModule !== 'function') {
+    throw new Error(
+      `Node builtin "${id}" unavailable (server-only SQLite). Use Node ≥ 22.5.`,
+    )
+  }
+  return proc.getBuiltinModule(id) as T
+}
 
 const JSON_COLUMNS = new Set([
   'topics',
@@ -53,10 +64,9 @@ function assertServer() {
 function getRawDb(): DatabaseSync {
   if (_db) return _db
   assertServer()
-  // Lazy require so Vite does not pull node builtins into the client graph
-  const fs = require('node:fs') as typeof import('node:fs')
-  const path = require('node:path') as typeof import('node:path')
-  const { DatabaseSync: DB } = require('node:sqlite') as typeof import('node:sqlite')
+  const fs = nodeBuiltin<FsType>('node:fs')
+  const path = nodeBuiltin<PathType>('node:path')
+  const { DatabaseSync: DB } = nodeBuiltin<SqliteType>('node:sqlite')
   const file = dbPath()
   fs.mkdirSync(path.dirname(file), { recursive: true })
   fs.mkdirSync(storageRoot(), { recursive: true })
@@ -69,10 +79,10 @@ function getRawDb(): DatabaseSync {
 
 function initSchema(
   db: DatabaseSync,
-  fs: typeof import('node:fs'),
-  path: typeof import('node:path'),
+  fs: FsType,
+  path: PathType,
 ) {
-  const { fileURLToPath } = require('node:url') as typeof import('node:url')
+  const { fileURLToPath } = nodeBuiltin<UrlType>('node:url')
   let sql = ''
   try {
     const schemaPath = path.join(
@@ -352,8 +362,8 @@ class StorageBucket {
   ) {
     try {
       assertServer()
-      const fs = require('node:fs') as typeof import('node:fs')
-      const path = require('node:path') as typeof import('node:path')
+      const fs = nodeBuiltin<FsType>('node:fs')
+      const path = nodeBuiltin<PathType>('node:path')
       const root = path.join(storageRoot(), this.bucket)
       const full = path.join(root, objectPath)
       fs.mkdirSync(path.dirname(full), { recursive: true })
@@ -370,8 +380,8 @@ class StorageBucket {
   async download(objectPath: string) {
     try {
       assertServer()
-      const fs = require('node:fs') as typeof import('node:fs')
-      const path = require('node:path') as typeof import('node:path')
+      const fs = nodeBuiltin<FsType>('node:fs')
+      const path = nodeBuiltin<PathType>('node:path')
       const full = path.join(storageRoot(), this.bucket, objectPath)
       const buf = fs.readFileSync(full)
       return { data: buf, error: null }
